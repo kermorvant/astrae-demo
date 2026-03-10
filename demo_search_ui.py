@@ -21,6 +21,13 @@ class Metadata:
     type: str
 
 @dataclass
+class EntityMention:
+    type: str
+    value: str
+    offset: int
+    length: int
+
+@dataclass
 class Document:
     id: str
     title: str
@@ -46,6 +53,7 @@ class Element:
     iiif_base: str = None
     region: IIIFRegion = None
     metadata: List[Metadata] = field(default_factory=list)
+    entitymentions: List[EntityMention] = field(default_factory=list)
     
     view: View = None
     document: Document = None
@@ -68,6 +76,7 @@ def load_data(filepath: str):
             e_type = e.get('type')
             region = IIIFRegion(**e['region']) if e.get('region') else None
             metas = [Metadata(**m) for m in e.get('metadata', [])]
+            mentions = [EntityMention(**em) for em in e.get('entitymentions', [])]
             
             el = Element(
                 id=e['id'],
@@ -77,7 +86,8 @@ def load_data(filepath: str):
                 view_id=e.get('view_id'),
                 iiif_base=e.get('iiif_base'),
                 region=region,
-                metadata=metas
+                metadata=metas,
+                entitymentions=mentions
             )
             
             if el.view_id and el.view_id in views:
@@ -210,7 +220,45 @@ def show_detail_page(el: Element):
         
         main_text = el.text if el.type == 'paragraph' else el.description
         if main_text:
-            st.markdown(f"**Text / Description:**\n\n{main_text}")
+            text_to_display = main_text
+            
+            if el.entitymentions:
+                # Need to replace from back to front so we don't mess up offsets
+                sorted_mentions = sorted(el.entitymentions, key=lambda x: x.offset, reverse=True)
+                for ent in sorted_mentions:
+                    start = ent.offset
+                    end = start + ent.length
+                    
+                    if start >= 0 and end <= len(text_to_display):
+                        # Determine color and short code based on type
+                        color = "#e2e8f0"  # generic gray
+                        short_code = "UNK"
+                        etype = ent.type.lower()
+                        if etype == "person":
+                            color = "#fed7aa" # orangeish
+                            short_code = "PER"
+                        elif etype == "location":
+                            color = "#bbf7d0" # greenish
+                            short_code = "LOC"
+                        elif etype == "date":
+                            color = "#bfdbfe" # blueish
+                            short_code = "DAT"
+                        elif etype == "organisation" or etype == "institution":
+                            color = "#fbcfe8" # pinkish
+                            short_code = "ORG"
+                        elif etype == "artwork":
+                            color = "#fef08a" # yellowish
+                            short_code = "ART"
+                        elif etype == "event" or etype == "exhibition":
+                            color = "#e9d5ff" # purpleish
+                            short_code = "EVE"
+                        
+                        original_substr = text_to_display[start:end]
+                        highlighted = f"<mark style='background-color: {color}; color: #000; padding: 2px 4px; border-radius: 4px; line-height: 2;'>{original_substr} <span style='font-size: 0.7em; font-weight: bold; opacity: 0.7;'>{short_code}</span></mark>"
+                        
+                        text_to_display = text_to_display[:start] + highlighted + text_to_display[end:]
+                        
+            st.markdown(f"**Text / Description:**\n\n{text_to_display}", unsafe_allow_html=True)
             
         if el.metadata:
             st.markdown("**Element Metadata:**")
@@ -220,7 +268,7 @@ def show_detail_page(el: Element):
 def main():
     st.set_page_config(page_title="Data Search Demo", layout="wide")
     
-    elements = load_data('data_objects.json')
+    elements = load_data('data_objects_enriched.json')
     if not elements:
         return
         
@@ -308,17 +356,24 @@ def main():
             main_text = e.text if e.type == 'paragraph' else e.description
             match_text = query_lower in (main_text or "").lower()
             match_meta = False
+            match_entity = False
             
             if e.metadata:
                 for m in e.metadata:
                     if m.type == 'text' and m.value:
                         if query_lower in str(m.value).lower():
                             match_meta = True
-                            break
+                            
+            if e.entitymentions:
+                for em in e.entitymentions:
+                    if query_lower in em.value.lower():
+                        match_entity = True
+                        break
             
-            if match_text or match_meta:
+            if match_text or match_meta or match_entity:
                 e._match_text = match_text
                 e._match_meta = match_meta
+                e._match_entity = match_entity
                 new_results.append(e)
         results = new_results
 
@@ -390,6 +445,7 @@ def main():
                         has_search = bool(search_query.strip())
                         match_text = getattr(e, '_match_text', False)
                         match_meta = getattr(e, '_match_meta', False)
+                        match_entity = getattr(e, '_match_entity', False)
                         
                         if e.type in ['illustration', 'painting']:
                             match_labels = []
@@ -398,6 +454,8 @@ def main():
                                     match_labels.append("content")
                                 if match_meta:
                                     match_labels.append("metadata")
+                                if match_entity:
+                                    match_labels.append("entity")
                             else:
                                 match_labels.append("content")
                                 
@@ -412,6 +470,8 @@ def main():
                                     match_labels.append("text")
                                 if match_meta:
                                     match_labels.append("metadata")
+                                if match_entity:
+                                    match_labels.append("entity")
                             else:
                                 match_labels.append("text")
                                 
