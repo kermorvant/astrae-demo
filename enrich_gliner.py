@@ -28,7 +28,7 @@ def main():
 
     paragraphs_to_process = [el for el in elements if el.get("type") == "paragraph"]
     # Limit to 50 for testing
-    paragraphs_to_process = paragraphs_to_process[:50]
+    paragraphs_to_process = paragraphs_to_process[:1000]
     
     print(f"Processing {len(paragraphs_to_process)} paragraph elements...")
     nb_entities = 0
@@ -37,6 +37,12 @@ def main():
             
         if not text:
             continue
+            
+        # Pre-process text to remove hyphenation (e.g., "tech- nique" -> "technique")
+        # Removing a hyphen followed by any whitespace characters.
+        import re
+        text = re.sub(r'-\s+', '', text)
+        el["text"] = text
             
         # Predict entities
         entities = model.predict_entities(text, labels)
