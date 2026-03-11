@@ -1,4 +1,5 @@
 import json
+import argparse
 import re
 import ast
 from dataclasses import dataclass, field, asdict
@@ -139,14 +140,16 @@ def iconclass_to_pyramid_level(code: str) -> int:
         return 6   # landscape / lighting
     return 5
 
-def main():
+def main(extract_ic=True):
     open_database(Path("astrae-collection-20260310-220013.sqlite"))
 
-    try:
-        from iconclass import init as iconclass_init
-        ic = iconclass_init()
-    except ImportError:
-        ic = None
+    ic = None
+    if extract_ic:
+        try:
+            from iconclass import init as iconclass_init
+            ic = iconclass_init()
+        except ImportError:
+            ic = None
 
     CONFIG_ID = '273da36d-a36a-46ba-8325-752ed5ff6c3b'
     ICONCLASS_RE = re.compile(r'\(\s*\d+[A-Z0-9, +\-]*(?:\([^\)]*\))?\s*\)')
@@ -331,4 +334,8 @@ def main():
     print("Saved to data_objects.json")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Convert Astrae export to JSON objects")
+    parser.add_argument("--no-iconclass", action="store_true", help="Disable extraction of Iconclass metadata")
+    args = parser.parse_args()
+    
+    main(extract_ic=not args.no_iconclass)

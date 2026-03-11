@@ -1,2 +1,5 @@
 streamlit==1.55.0
 typesense==2.0.0
+arkindex-export==0.2.1
+tqdm==4.67.3
+gliner==0.2.25
