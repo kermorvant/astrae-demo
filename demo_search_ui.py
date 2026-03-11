@@ -104,31 +104,18 @@ def load_data(filepath: str):
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
+
+        views = {v['id']: View(id=v['id'], document_id=v['document_id'], iiif_base=v['iiif_base'], region=IIIFRegion(**v['region']) if 'region' in v else None, name=v['name']) for v in data.get('views', [])}
+        docs = {d['id']: Document(id=d['id'], title=d['title'], creator=d['creator'], date=d['date'], metadata=[Metadata(**m) for m in d.get('metadata', [])]) for d in data.get('documents', [])}
         
-        docs = {d['id']: Document(**d) for d in data.get('documents', [])}
-        
-        views = {}
-        for v in data.get('views', []):
-            if v.get('region'):
-                region_data = v['region']
-                if 'source' in region_data and region_data['source']:
-                    region_data['source'] = Source(**region_data['source'])
-                v['region'] = IIIFRegion(**region_data)
-            else:
-                v['region'] = None
-            views[v['id']] = View(**v)
-            
         elements = []
         for e in data.get('elements', []):
-            e_type = e.get('type')
+            e_type = e['type']
             
-            region = None
-            if e.get('region'):
-                region_data = e['region']
-                if 'source' in region_data and region_data['source']:
-                    region_data['source'] = Source(**region_data['source'])
-                region = IIIFRegion(**region_data)
-                
+            region = IIIFRegion(**e['region']) if 'region' in e and e['region'] else None
+            if region and 'source' in e['region'] and e['region']['source']:
+                region.source = Source(**e['region']['source'])
+
             metas = []
             for m in e.get('metadata', []):
                 if 'source' in m and m['source']:
@@ -172,15 +159,68 @@ def load_data(filepath: str):
             
             if el.view_id and el.view_id in views:
                 el.view = views[el.view_id]
-                if el.view.document_id and el.view.document_id in docs:
-                    el.document = docs[el.view.document_id]
-            
+                el.document = docs.get(el.view.document_id)
+                
             elements.append(el)
             
         return elements
-    except FileNotFoundError:
-        st.error(f"File {filepath} not found.")
+    except Exception as e:
+        st.error(f"Error loading data: {e}")
         return []
+
+@st.cache_resource
+def get_typesense_client():
+    import toml
+    import typesense
+    secrets = toml.load(".streamlit/secrets.toml")
+    client = typesense.Client({
+        'nodes': [{
+            'host': secrets['TYPESENSE_HOST'],
+            'port': secrets['TYPESENSE_PORT'],
+            'protocol': secrets['TYPESENSE_PROTOCOL']
+        }],
+        'api_key': secrets['TYPESENSE_API_KEY'],
+        'connection_timeout_seconds': 2
+    })
+    return client
+
+def parse_typesense_query(query_str: str):
+    tokens = query_str.split()
+    free_text = []
+    filters = []
+    
+    category_map = ["person", "animal", "scene", "artifact", "building"]
+
+    for token in tokens:
+        # Ignore boolean operators if they are typed standalone, string joins happen automatically
+        if token in ["AND", "OR", "NOT"]:
+            continue
+
+        if ":" in token:
+            field, value = token.split(":", 1)
+            
+            if field in category_map:
+                filters.append(f"concept_categories:={field}")
+                free_text.append(value)
+            elif field == "concept":
+                filters.append(f"concept_labels:={value}")
+            elif field == "content":
+                free_text.append(value)
+            elif field == "level":
+                filters.append(f"concept_levels:={value}")
+            elif field == "vocab":
+                filters.append(f"concept_vocabularies:={value}")
+            elif field == "meta":
+                filters.append(f"metadata_values:={value}")
+            else:
+                free_text.append(token)
+        else:
+            free_text.append(token)
+
+    q = " ".join(free_text) if free_text else "*"
+    filter_by = " && ".join(filters) if filters else ""
+    return q, filter_by
+
 
 def get_snippet_url(el: Element) -> str:
     # If the element itself has iiif_base (like ArtWork), use it, otherwise use its view
@@ -417,7 +457,7 @@ def show_detail_page(el: Element, search_query: str = ""):
                     else:
                         items.append(f"📌 {c.label} {badge}")
                 
-                st.markdown(f"**Level {level} ({level_name.replace('_', ' ').title()})** &nbsp;&nbsp; " + " &nbsp;|&nbsp; ".join(items), unsafe_allow_html=True)
+                st.markdown(f"**Level {level} ({level_name.replace('_', ' ').title()})** &nbsp;&nbsp; " + " &nbsp;".join(items), unsafe_allow_html=True)
 
 def main():
     st.set_page_config(page_title="Data Search Demo", layout="wide")
@@ -498,39 +538,67 @@ def main():
         st.session_state.page_num = 0
         st.session_state.last_query = current_state
 
-    results = elements
-    
-    if selected_types:
-        results = [e for e in results if e.type in selected_types]
+    if elements:
+        client = get_typesense_client()
+        q, filter_by = parse_typesense_query(search_query)
         
-    if search_query:
-        query_lower = search_query.lower()
-        new_results = []
-        for e in results:
-            main_text = e.text if e.type == 'paragraph' else e.description
-            match_text = query_lower in (main_text or "").lower()
-            match_meta = False
-            match_entity = False
+        search_parameters = {
+            'q': q,
+            'query_by': 'text,description,concept_labels,metadata_values',
+            'per_page': 250
+        }
+        
+        ui_filters = []
+        if selected_types:
+            ts = ",".join([f"'{t}'" for t in selected_types])
+            ui_filters.append(f"type:=[{ts}]")
             
-            if e.metadata:
-                for m in e.metadata:
-                    if m.type == 'text' and m.value:
-                        if query_lower in str(m.value).lower():
-                            match_meta = True
+            
+        ui_filter_str = " && ".join(ui_filters)
+        
+        final_filter = filter_by
+        if ui_filter_str:
+            if final_filter:
+                final_filter += f" && {ui_filter_str}"
+            else:
+                final_filter = ui_filter_str
+                
+        if final_filter:
+            search_parameters['filter_by'] = final_filter
+                
+        try:
+            ts_results = client.collections['elements'].documents.search(search_parameters)
+            total_ts_results = ts_results.get('found', 0)
+            
+            element_map = {e.id: e for e in elements}
+            results = []
+            for hit in ts_results.get('hits', []):
+                hid = hit['document']['id']
+                if hid in element_map:
+                    e = element_map[hid]
+                    
+                    e._match_text = False
+                    e._match_meta = False
+                    e._match_entity = False
+                    
+                    for hl in hit.get('highlights', []):
+                        f = hl.get('field', '')
+                        if f in ['text', 'description']:
+                            e._match_text = True
+                        elif f == 'metadata_values':
+                            e._match_meta = True
+                        elif f in ['concept_labels', 'concept_categories', 'concept_vocabularies']:
+                            e._match_entity = True
                             
-            if e.concept_mentions:
-                for cm in e.concept_mentions:
-                    concept = next((c for c in e.concepts if c.id == cm.concept_id), None)
-                    if concept and concept.label and query_lower in concept.label.lower():
-                        match_entity = True
-                        break
-            
-            if match_text or match_meta or match_entity:
-                e._match_text = match_text
-                e._match_meta = match_meta
-                e._match_entity = match_entity
-                new_results.append(e)
-        results = new_results
+                    results.append(e)
+                    
+        except Exception as e:
+            st.error(f"Typesense search error: {e}")
+            results = []
+            total_ts_results = 0
+    else:
+        results = []
+        total_ts_results = 0
 
     if active_filters['numeric'] or active_filters['date']:
         filtered_results = []
@@ -573,9 +641,10 @@ def main():
             if keep:
                 filtered_results.append(e)
         results = filtered_results
+        total_results = len(results)
+    else:
+        total_results = total_ts_results if 'total_ts_results' in locals() else len(results)
         
-    total_results = len(results)
-    
     items_per_page = 50
     start_idx = st.session_state.page_num * items_per_page
     end_idx = start_idx + items_per_page
