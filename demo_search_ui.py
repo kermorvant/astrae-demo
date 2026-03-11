@@ -34,6 +34,7 @@ class Concept:
     label: str
     vocabulary: str
     pyramid_level: int
+    category: Optional[str] = None
     external_id: Optional[str] = None
     source: Optional[Source] = None
 
@@ -259,7 +260,11 @@ def render_source_badge(source: Optional[Source]) -> str:
     if not source:
         return ""
     agent_str = f"/{source.agent}" if source.agent else ""
-    return f"<span style='background-color: #f1f5f9; color: #64748b; font-size: 0.7em; padding: 2px 6px; border-radius: 12px; margin-left: 8px; border: 1px solid #cbd5e1;'>{source.method}{agent_str}</span>"
+    full_info = f"{source.method}{agent_str}"
+    
+    icon = "👤" if source.method == "manual" else "✨"
+    
+    return f"<span title='{full_info}' style='cursor: help; margin-left: 6px; font-size: 1.1em;'>{icon}</span>"
 
 def show_detail_page(el: Element, search_query: str = ""):
     st.button("← Back to Search", on_click=lambda: st.session_state.pop('selected_element'))
@@ -340,8 +345,30 @@ def show_detail_page(el: Element, search_query: str = ""):
                             color = "#e2e8f0"  # generic gray
                             short_code = "CON"
                             if concept.vocabulary == "entity":
-                                color = "#fed7aa" # orangeish
                                 short_code = "ENT"
+                                color = "#fed7aa" # default orangeish
+                                if getattr(concept, 'category', None):
+                                    cat = concept.category.lower()
+                                    if cat == "person":
+                                        short_code = "PER"
+                                        color = "#fed7aa" 
+                                    elif cat in ["location", "place"]:
+                                        short_code = "LOC"
+                                        color = "#bbf7d0" 
+                                    elif cat == "date":
+                                        short_code = "DAT"
+                                        color = "#bfdbfe" 
+                                    elif cat in ["organisation", "organization", "institution"]:
+                                        short_code = "ORG"
+                                        color = "#fbcfe8" 
+                                    elif cat == "artwork":
+                                        short_code = "ART"
+                                        color = "#fef08a" 
+                                    elif cat in ["event", "exhibition"]:
+                                        short_code = "EVE"
+                                        color = "#e9d5ff" 
+                                    else:
+                                        short_code = cat[:3].upper()
                             elif concept.vocabulary == "iconclass":
                                 color = "#fef08a" # yellowish
                                 short_code = "ICO"
@@ -385,7 +412,8 @@ def show_detail_page(el: Element, search_query: str = ""):
                     if c.vocabulary == 'iconclass':
                         items.append(f"🎨 **[{c.external_id}]** {c.label.capitalize()} {badge}")
                     elif c.vocabulary == 'entity':
-                        items.append(f"🏷️ {c.label} {badge}")
+                        cat_str = f" ({c.category})" if getattr(c, 'category', None) else ""
+                        items.append(f"🏷️ {c.label}{cat_str} {badge}")
                     else:
                         items.append(f"📌 {c.label} {badge}")
                 

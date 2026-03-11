@@ -42,7 +42,7 @@ def main():
 
     paragraphs_to_process = [el for el in elements if el.get("type") == "paragraph"]
     # Limit to 50 for testing
-    paragraphs_to_process = paragraphs_to_process[:5000]
+    paragraphs_to_process = paragraphs_to_process[:1000]
     
     print(f"Processing {len(paragraphs_to_process)} paragraph elements...")
     nb_entities = 0
@@ -85,6 +85,7 @@ def main():
                     "label": text_val,
                     "vocabulary": "entity",
                     "pyramid_level": p_level,
+                    "category": lbl_type,
                     "source": { "method": "ai", "agent": "gliner" }
                 })
             
