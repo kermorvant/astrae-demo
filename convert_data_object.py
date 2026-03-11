@@ -32,6 +32,23 @@ class Metadata:
     source: Optional[Source] = None
 
 @dataclass
+class Concept:
+    id: str
+    label: str
+    vocabulary: str
+    pyramid_level: int
+    external_id: Optional[str] = None
+    source: Optional[Source] = None
+
+@dataclass
+class ConceptMention:
+    concept_id: str
+    element_id: str
+    offset: Optional[int] = None
+    length: Optional[int] = None
+    source: Optional[Source] = None
+
+@dataclass
 class View:
     id: str
     document_id: str
@@ -46,6 +63,8 @@ class Paragraph:
     region: IIIFRegion
     text: str
     text_source: Optional[Source] = None
+    concepts: List[Concept] = field(default_factory=list)
+    concept_mentions: List[ConceptMention] = field(default_factory=list)
 
 @dataclass
 class Illustration:
@@ -55,6 +74,8 @@ class Illustration:
     description: str
     description_source: Optional[Source] = None
     metadata: List[Metadata] = field(default_factory=list)
+    concepts: List[Concept] = field(default_factory=list)
+    concept_mentions: List[ConceptMention] = field(default_factory=list)
 
 @dataclass
 class ArtWork:
@@ -64,6 +85,8 @@ class ArtWork:
     description: str
     description_source: Optional[Source] = None
     metadata: List[Metadata] = field(default_factory=list)
+    concepts: List[Concept] = field(default_factory=list)
+    concept_mentions: List[ConceptMention] = field(default_factory=list)
 
 @dataclass
 class Document:
@@ -101,8 +124,29 @@ def get_region_obj(element, source: Optional[Source] = None) -> IIIFRegion:
         source=source
     )
 
+def iconclass_to_pyramid_level(code: str) -> int:
+    if code.startswith("31"):
+        return 5   # humans
+    if code.startswith("14"):
+        return 5   # animals
+    if code.startswith("41A"):
+        return 5   # objects / furniture
+    if code.startswith("41D"):
+        return 5   # clothing
+    if code.startswith("41B"):
+        return 6   # architectural setting
+    if code.startswith("25"):
+        return 6   # landscape / lighting
+    return 5
+
 def main():
     open_database(Path("astrae-collection-20260310-220013.sqlite"))
+
+    try:
+        from iconclass import init as iconclass_init
+        ic = iconclass_init()
+    except ImportError:
+        ic = None
 
     CONFIG_ID = '273da36d-a36a-46ba-8325-752ed5ff6c3b'
     ICONCLASS_RE = re.compile(r'\(\s*\d+[A-Z0-9, +\-]*(?:\([^\)]*\))?\s*\)')
@@ -160,12 +204,41 @@ def main():
             transcriptions = Transcription.select().where(Transcription.element==element.id)
             transcription_text = ""
             
+            concepts = []
+            concept_mentions = []
+            
             if element.type == 'paragraph':
                 if transcriptions.count() > 0:
                     transcription_text = transcriptions[0].text
             else:
                 for t in transcriptions:
                     if t.worker_run and t.worker_run.configuration_id == CONFIG_ID:
+                        # Extract iconclass tags before stripping
+                        if ic:
+                            matches = ICONCLASS_RE.findall(t.text)
+                            for mx in matches:
+                                ic_code = mx.strip('() ')
+                                try:
+                                    ic_obj = ic[ic_code]
+                                    lbl = ic_obj('en') if hasattr(ic_obj, '__call__') else ic_code
+                                except Exception:
+                                    lbl = ic_code
+                                
+                                cid = f"iconclass_{ic_code}"
+                                if not any(c.id == cid for c in concepts):
+                                    concepts.append(Concept(
+                                        id=cid,
+                                        label=lbl,
+                                        vocabulary="iconclass",
+                                        pyramid_level=iconclass_to_pyramid_level(ic_code),
+                                        external_id=ic_code,
+                                        source=Source(method="genai", agent="gemini-2.5-flash")
+                                    ))
+                                concept_mentions.append(ConceptMention(
+                                    concept_id=cid,
+                                    element_id=element.id
+                                ))
+                        
                         clean_text = ICONCLASS_RE.sub('', t.text)
                         transcription_text = ' '.join(clean_text.split())
                         break
@@ -177,18 +250,22 @@ def main():
                     view_id=view.id,
                     region=get_region_obj(element),
                     text=transcription_text,
-                    text_source=text_src
+                    text_source=text_src,
+                    concepts=concepts,
+                    concept_mentions=concept_mentions
                 )
                 data.append({'type': 'paragraph', **asdict(p)})
             elif element.type == 'illustration':
-                reg_src = Source(method="ai", agent="yolo")
+                reg_src = Source(method="cv", agent="yolo")
                 metas = [Metadata(name=m.name, value=m.value, type=m.type, source=Source(method="manual")) for m in DBMetadata.select().where(DBMetadata.element_id == element.id)]
                 i = Illustration(
                     id=element.id,
                     view_id=view.id,
                     region=get_region_obj(element, source=reg_src),
                     description=transcription_text,
-                    metadata=metas
+                    metadata=metas,
+                    concepts=concepts,
+                    concept_mentions=concept_mentions
                 )
                 data.append({'type': 'illustration', **asdict(i)})
 
@@ -196,8 +273,36 @@ def main():
     for painting in Element.select().where(Element.type == 'painting'):
         transcriptions = Transcription.select().where(Transcription.element==painting.id)
         transcription_text = ""
+        concepts = []
+        concept_mentions = []
+        
         for t in transcriptions:
             if t.worker_run and t.worker_run.configuration_id == CONFIG_ID:
+                if ic:
+                    matches = ICONCLASS_RE.findall(t.text)
+                    for mx in matches:
+                        ic_code = mx.strip('() ')
+                        try:
+                            ic_obj = ic[ic_code]
+                            lbl = ic_obj('en') if hasattr(ic_obj, '__call__') else ic_code
+                        except Exception:
+                            lbl = ic_code
+                        
+                        cid = f"iconclass_{ic_code}"
+                        if not any(c.id == cid for c in concepts):
+                            concepts.append(Concept(
+                                id=cid,
+                                label=lbl,
+                                vocabulary="iconclass",
+                                pyramid_level=iconclass_to_pyramid_level(ic_code),
+                                external_id=ic_code,
+                                source=Source(method="genai", agent="gemini-2.5-flash")
+                            ))
+                        concept_mentions.append(ConceptMention(
+                            concept_id=cid,
+                            element_id=painting.id
+                        ))
+                
                 clean_text = ICONCLASS_RE.sub('', t.text)
                 transcription_text = ' '.join(clean_text.split())
                 break
@@ -209,7 +314,9 @@ def main():
             iiif_base=painting.image.url if painting.image else "",
             region=get_region_obj(painting),
             description=transcription_text,
-            metadata=metas
+            metadata=metas,
+            concepts=concepts,
+            concept_mentions=concept_mentions
         )
         data.append({'type': 'painting', **asdict(a)})
 

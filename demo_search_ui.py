@@ -29,11 +29,20 @@ class Metadata:
     source: Optional[Source] = None
 
 @dataclass
-class EntityMention:
-    type: str
-    value: str
-    offset: int
-    length: int
+class Concept:
+    id: str
+    label: str
+    vocabulary: str
+    pyramid_level: int
+    external_id: Optional[str] = None
+    source: Optional[Source] = None
+
+@dataclass
+class ConceptMention:
+    concept_id: str
+    element_id: str
+    offset: Optional[int] = None
+    length: Optional[int] = None
     source: Optional[Source] = None
 
 @dataclass
@@ -43,6 +52,19 @@ class Document:
     creator: str
     date: str
     metadata: List[Metadata] = field(default_factory=list)
+
+PYRAMID_LEVELS = {
+    1: "type_technique",
+    2: "global_distribution",
+    3: "local_structure",
+    4: "global_composition",
+    5: "generic_object",
+    6: "generic_scene",
+    7: "specific_object",
+    8: "specific_scene",
+    9: "abstract_object",
+    10: "abstract_scene"
+}
 
 @dataclass
 class View:
@@ -69,8 +91,10 @@ class Element:
     region: Optional[IIIFRegion] = None
 
     metadata: List[Metadata] = field(default_factory=list)
-    entitymentions: List[EntityMention] = field(default_factory=list)
     
+    concepts: List[Concept] = field(default_factory=list)
+    concept_mentions: List[ConceptMention] = field(default_factory=list)
+
     view: Optional[View] = None
     document: Optional[Document] = None
 
@@ -110,11 +134,17 @@ def load_data(filepath: str):
                     m['source'] = Source(**m['source'])
                 metas.append(Metadata(**m))
                 
-            mentions = []
-            for em in e.get('entitymentions', []):
-                if 'source' in em and em['source']:
-                    em['source'] = Source(**em['source'])
-                mentions.append(EntityMention(**em))
+            concepts = []
+            for c in e.get('concepts', []):
+                if 'source' in c and c['source']:
+                    c['source'] = Source(**c['source'])
+                concepts.append(Concept(**c))
+                
+            concept_mentions = []
+            for cm in e.get('concept_mentions', []):
+                if 'source' in cm and cm['source']:
+                    cm['source'] = Source(**cm['source'])
+                concept_mentions.append(ConceptMention(**cm))
                 
             text_source = None
             if e.get('text_source'):
@@ -135,7 +165,8 @@ def load_data(filepath: str):
                 iiif_base=e.get('iiif_base'),
                 region=region,
                 metadata=metas,
-                entitymentions=mentions
+                concepts=concepts,
+                concept_mentions=concept_mentions
             )
             
             if el.view_id and el.view_id in views:
@@ -247,7 +278,8 @@ def show_detail_page(el: Element, search_query: str = ""):
             
         if iiif:
             st.markdown(f"*Interactive IIIF Context Viewer*{render_source_badge(el.region.source if el.region else None)}", unsafe_allow_html=True)
-            html_code = get_openseadragon_html(iiif, el.region)
+            region_to_draw = None if el.type == 'painting' else el.region
+            html_code = get_openseadragon_html(iiif, region_to_draw)
             components.html(html_code, height=620)
         else:
             st.warning("No context image available.")
@@ -269,6 +301,11 @@ def show_detail_page(el: Element, search_query: str = ""):
         if el.view:
             st.markdown(f"**View Name:** {el.view.name}")
             
+        if el.metadata:
+            st.markdown("**Element Metadata:**")
+            for m in el.metadata:
+                st.markdown(f"- **{m.name}**: {m.value} {render_source_badge(m.source)}", unsafe_allow_html=True)
+            
         st.markdown("---")
         st.subheader("Element Details")
         
@@ -276,45 +313,43 @@ def show_detail_page(el: Element, search_query: str = ""):
         if main_text:
             text_to_display = main_text
             
-            if el.entitymentions:
-                # Add overall GLiNER badge if entities exist
-                gliner_src = Source(method="ai", agent="gliner")
-                st.markdown(f"*{len(el.entitymentions)} Entities Detected* {render_source_badge(gliner_src)}", unsafe_allow_html=True)
-                
-                # Need to replace from back to front so we don't mess up offsets
-                sorted_mentions = sorted(el.entitymentions, key=lambda x: x.offset, reverse=True)
-                for ent in sorted_mentions:
-                    start = ent.offset
-                    end = start + ent.length
+            if el.concept_mentions:
+                # Filter mentions that have offsets (to highlight in text)
+                ent_mentions = [cm for cm in el.concept_mentions if cm.offset is not None]
+                if ent_mentions:
+                    # Collect unique sources from these mentions
+                    sources = []
+                    for cm in ent_mentions:
+                        if cm.source and cm.source not in sources:
+                            sources.append(cm.source)
+                    badges = "".join([render_source_badge(s) for s in sources])
+                    st.markdown(f"*{len(ent_mentions)} Concept Mentions in Text* {badges}", unsafe_allow_html=True)
                     
-                    if start >= 0 and end <= len(text_to_display):
-                        # Determine color and short code based on type
-                        color = "#e2e8f0"  # generic gray
-                        short_code = "UNK"
-                        etype = ent.type.lower()
-                        if etype == "person":
-                            color = "#fed7aa" # orangeish
-                            short_code = "PER"
-                        elif etype == "location":
-                            color = "#bbf7d0" # greenish
-                            short_code = "LOC"
-                        elif etype == "date":
-                            color = "#bfdbfe" # blueish
-                            short_code = "DAT"
-                        elif etype == "organisation" or etype == "institution":
-                            color = "#fbcfe8" # pinkish
-                            short_code = "ORG"
-                        elif etype == "artwork":
-                            color = "#fef08a" # yellowish
-                            short_code = "ART"
-                        elif etype == "event" or etype == "exhibition":
-                            color = "#e9d5ff" # purpleish
-                            short_code = "EVE"
+                    # Need to replace from back to front so we don't mess up offsets
+                    sorted_mentions = sorted(ent_mentions, key=lambda x: x.offset, reverse=True)
+                    for ent in sorted_mentions:
+                        concept = next((c for c in el.concepts if c.id == ent.concept_id), None)
+                        if not concept:
+                            continue
                         
-                        original_substr = text_to_display[start:end]
-                        highlighted = f"<mark style='background-color: {color}; color: #000; padding: 2px 4px; border-radius: 4px; line-height: 2;'>{original_substr} <span style='font-size: 0.7em; font-weight: bold; opacity: 0.7;'>{short_code}</span></mark>"
+                        start = ent.offset
+                        end = start + ent.length
                         
-                        text_to_display = text_to_display[:start] + highlighted + text_to_display[end:]
+                        if start >= 0 and end <= len(text_to_display):
+                            # Determine color and short code based on type
+                            color = "#e2e8f0"  # generic gray
+                            short_code = "CON"
+                            if concept.vocabulary == "entity":
+                                color = "#fed7aa" # orangeish
+                                short_code = "ENT"
+                            elif concept.vocabulary == "iconclass":
+                                color = "#fef08a" # yellowish
+                                short_code = "ICO"
+                                
+                            original_substr = text_to_display[start:end]
+                            highlighted = f"<mark style='background-color: {color}; color: #000; padding: 2px 4px; border-radius: 4px; line-height: 2;'>{original_substr} <span style='font-size: 0.7em; font-weight: bold; opacity: 0.7;'>{short_code}</span></mark>"
+                            
+                            text_to_display = text_to_display[:start] + highlighted + text_to_display[end:]
                         
             # Highlight the search term if present
             if search_query:
@@ -331,10 +366,30 @@ def show_detail_page(el: Element, search_query: str = ""):
             src = el.text_source if el.type == 'paragraph' else el.description_source
             st.markdown(f"**Text / Description:** {render_source_badge(src)}\n\n{text_to_display}", unsafe_allow_html=True)
             
-        if el.metadata:
-            st.markdown("**Element Metadata:**")
-            for m in el.metadata:
-                st.markdown(f"- **{m.name}**: {m.value} {render_source_badge(m.source)}", unsafe_allow_html=True)
+        if el.concepts:
+            st.markdown("**Concepts:**")
+            
+            # Group concepts by their pyramid level
+            from collections import defaultdict
+            grouped_concepts = defaultdict(list)
+            for c in el.concepts:
+                grouped_concepts[c.pyramid_level].append(c)
+                
+            sorted_levels = sorted(grouped_concepts.keys())
+            for level in sorted_levels:
+                level_name = PYRAMID_LEVELS.get(level, "unknown")
+                
+                items = []
+                for c in grouped_concepts[level]:
+                    badge = render_source_badge(c.source)
+                    if c.vocabulary == 'iconclass':
+                        items.append(f"🎨 **[{c.external_id}]** {c.label.capitalize()} {badge}")
+                    elif c.vocabulary == 'entity':
+                        items.append(f"🏷️ {c.label} {badge}")
+                    else:
+                        items.append(f"📌 {c.label} {badge}")
+                
+                st.markdown(f"**Level {level} ({level_name.replace('_', ' ').title()})** &nbsp;&nbsp; " + " &nbsp;|&nbsp; ".join(items), unsafe_allow_html=True)
 
 def main():
     st.set_page_config(page_title="Data Search Demo", layout="wide")
@@ -435,9 +490,10 @@ def main():
                         if query_lower in str(m.value).lower():
                             match_meta = True
                             
-            if e.entitymentions:
-                for em in e.entitymentions:
-                    if query_lower in em.value.lower():
+            if e.concept_mentions:
+                for cm in e.concept_mentions:
+                    concept = next((c for c in e.concepts if c.id == cm.concept_id), None)
+                    if concept and concept.label and query_lower in concept.label.lower():
                         match_entity = True
                         break
             

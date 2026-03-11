@@ -18,6 +18,20 @@ def main():
     model = GLiNER.from_pretrained("urchade/gliner_mediumv2.1")
 
     labels = ["person", "artwork", "organisation", "date", "location", "event"]
+    
+    ENTITY_TYPE_TO_LEVEL = {
+        "person": 7,
+        "artist": 7,
+        "mythological_figure": 7,
+        "character": 7,
+        "deity": 7,
+        "organisation": 7,
+        "organization": 7,
+        "artwork": 7,
+        "place": 8,
+        "location": 8,
+        "event": 8
+    }
 
     print(f"Loading data from {args.input}...")
     with open(args.input, "r", encoding="utf-8") as f:
@@ -47,17 +61,36 @@ def main():
         # Predict entities
         entities = model.predict_entities(text, labels)
         
-        if "entitymentions" not in el:
-            el["entitymentions"] = []
+        if "concepts" not in el:
+            el["concepts"] = []
+        if "concept_mentions" not in el:
+            el["concept_mentions"] = []
+            
+        import hashlib
             
         for ent in entities:
             # GLiNER returns dicts with 'start', 'end', 'label', 'text'
             offset = ent.get("start", 0)
             length = ent.get("end", 0) - offset
             
-            el["entitymentions"].append({
-                "type": ent["label"].capitalize(),
-                "value": ent["text"],
+            text_val = ent["text"]
+            lbl_type = ent["label"].lower()
+            cid = f"entity_{hashlib.md5(text_val.encode()).hexdigest()[:8]}"
+            
+            p_level = ENTITY_TYPE_TO_LEVEL.get(lbl_type, 7)
+            
+            if not any(c["id"] == cid for c in el["concepts"]):
+                el["concepts"].append({
+                    "id": cid,
+                    "label": text_val,
+                    "vocabulary": "entity",
+                    "pyramid_level": p_level,
+                    "source": { "method": "ai", "agent": "gliner" }
+                })
+            
+            el["concept_mentions"].append({
+                "concept_id": cid,
+                "element_id": el.get("id"),
                 "offset": offset,
                 "length": length,
                 "source": { "method": "ai", "agent": "gliner" }
