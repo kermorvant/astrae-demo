@@ -410,10 +410,10 @@ def show_detail_page(el: Element, search_query: str = ""):
                 for c in grouped_concepts[level]:
                     badge = render_source_badge(c.source)
                     if c.vocabulary == 'iconclass':
-                        items.append(f"🎨 **[{c.external_id}]** {c.label.capitalize()} {badge}")
+                        items.append(f" **[{c.external_id}]** {c.label.capitalize()} {badge}")
                     elif c.vocabulary == 'entity':
                         cat_str = f" ({c.category})" if getattr(c, 'category', None) else ""
-                        items.append(f"🏷️ {c.label}{cat_str} {badge}")
+                        items.append(f"{c.label}{cat_str} {badge}")
                     else:
                         items.append(f"📌 {c.label} {badge}")
                 
