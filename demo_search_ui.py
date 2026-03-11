@@ -7,18 +7,26 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 
 @dataclass
+class Source:
+    method: str               # "manual", "ai", "ocr", "import"
+    agent: Optional[str] = None   # user id, model name (e.g. "gliner-base")
+    confidence: Optional[float] = None
+
+@dataclass
 class IIIFRegion:
     x: int
     y: int
     width: int
     height: int
     rotation_angle: int
+    source: Optional[Source] = None
 
 @dataclass
 class Metadata:
     name: str
     value: str
     type: str
+    source: Optional[Source] = None
 
 @dataclass
 class EntityMention:
@@ -26,6 +34,7 @@ class EntityMention:
     value: str
     offset: int
     length: int
+    source: Optional[Source] = None
 
 @dataclass
 class Document:
@@ -47,16 +56,23 @@ class View:
 class Element:
     id: str
     type: str
+
     text: str = ""
+    text_source: Optional[Source] = None
+
     description: str = ""
+    description_source: Optional[Source] = None
+
     view_id: str = None
     iiif_base: str = None
-    region: IIIFRegion = None
+
+    region: Optional[IIIFRegion] = None
+
     metadata: List[Metadata] = field(default_factory=list)
     entitymentions: List[EntityMention] = field(default_factory=list)
     
-    view: View = None
-    document: Document = None
+    view: Optional[View] = None
+    document: Optional[Document] = None
 
 @st.cache_data
 def load_data(filepath: str):
@@ -68,21 +84,53 @@ def load_data(filepath: str):
         
         views = {}
         for v in data.get('views', []):
-            v['region'] = IIIFRegion(**v['region']) if v.get('region') else None
+            if v.get('region'):
+                region_data = v['region']
+                if 'source' in region_data and region_data['source']:
+                    region_data['source'] = Source(**region_data['source'])
+                v['region'] = IIIFRegion(**region_data)
+            else:
+                v['region'] = None
             views[v['id']] = View(**v)
             
         elements = []
         for e in data.get('elements', []):
             e_type = e.get('type')
-            region = IIIFRegion(**e['region']) if e.get('region') else None
-            metas = [Metadata(**m) for m in e.get('metadata', [])]
-            mentions = [EntityMention(**em) for em in e.get('entitymentions', [])]
+            
+            region = None
+            if e.get('region'):
+                region_data = e['region']
+                if 'source' in region_data and region_data['source']:
+                    region_data['source'] = Source(**region_data['source'])
+                region = IIIFRegion(**region_data)
+                
+            metas = []
+            for m in e.get('metadata', []):
+                if 'source' in m and m['source']:
+                    m['source'] = Source(**m['source'])
+                metas.append(Metadata(**m))
+                
+            mentions = []
+            for em in e.get('entitymentions', []):
+                if 'source' in em and em['source']:
+                    em['source'] = Source(**em['source'])
+                mentions.append(EntityMention(**em))
+                
+            text_source = None
+            if e.get('text_source'):
+                text_source = Source(**e['text_source'])
+                
+            desc_source = None
+            if e.get('description_source'):
+                desc_source = Source(**e['description_source'])
             
             el = Element(
                 id=e['id'],
                 type=e_type,
                 text=e.get('text', ''),
+                text_source=text_source,
                 description=e.get('description', ''),
+                description_source=desc_source,
                 view_id=e.get('view_id'),
                 iiif_base=e.get('iiif_base'),
                 region=region,
@@ -176,7 +224,13 @@ def get_openseadragon_html(iiif_base: str, region: IIIFRegion) -> str:
     """
     return html_code
 
-def show_detail_page(el: Element):
+def render_source_badge(source: Optional[Source]) -> str:
+    if not source:
+        return ""
+    agent_str = f"/{source.agent}" if source.agent else ""
+    return f"<span style='background-color: #f1f5f9; color: #64748b; font-size: 0.7em; padding: 2px 6px; border-radius: 12px; margin-left: 8px; border: 1px solid #cbd5e1;'>{source.method}{agent_str}</span>"
+
+def show_detail_page(el: Element, search_query: str = ""):
     st.button("← Back to Search", on_click=lambda: st.session_state.pop('selected_element'))
     
     st.header(f"Details: {el.type.capitalize()} ({el.id})")
@@ -192,7 +246,7 @@ def show_detail_page(el: Element):
             iiif = el.view.iiif_base
             
         if iiif:
-            st.markdown("*Interactive IIIF Context Viewer*")
+            st.markdown(f"*Interactive IIIF Context Viewer*{render_source_badge(el.region.source if el.region else None)}", unsafe_allow_html=True)
             html_code = get_openseadragon_html(iiif, el.region)
             components.html(html_code, height=620)
         else:
@@ -208,7 +262,7 @@ def show_detail_page(el: Element):
             if el.document.metadata:
                 with st.expander("Document Metadata"):
                     for m in el.document.metadata:
-                        st.markdown(f"  - **{m.name}**: {m.value}")
+                        st.markdown(f"  - **{m.name}**: {m.value} {render_source_badge(m.source)}", unsafe_allow_html=True)
         else:
             st.markdown("*No document information linked.*")
             
@@ -223,6 +277,10 @@ def show_detail_page(el: Element):
             text_to_display = main_text
             
             if el.entitymentions:
+                # Add overall GLiNER badge if entities exist
+                gliner_src = Source(method="ai", agent="gliner")
+                st.markdown(f"*{len(el.entitymentions)} Entities Detected* {render_source_badge(gliner_src)}", unsafe_allow_html=True)
+                
                 # Need to replace from back to front so we don't mess up offsets
                 sorted_mentions = sorted(el.entitymentions, key=lambda x: x.offset, reverse=True)
                 for ent in sorted_mentions:
@@ -258,12 +316,25 @@ def show_detail_page(el: Element):
                         
                         text_to_display = text_to_display[:start] + highlighted + text_to_display[end:]
                         
-            st.markdown(f"**Text / Description:**\n\n{text_to_display}", unsafe_allow_html=True)
+            # Highlight the search term if present
+            if search_query:
+                escaped_query = re.escape(search_query.strip())
+                if escaped_query:
+                    # Case-insensitive replacement, wrapping matched terms in neon yellow
+                    text_to_display = re.sub(
+                        f"({escaped_query})",
+                        r"<mark style='background-color: #ffeb3b; color: #000; padding: 0 4px; border-radius: 3px;'>\1</mark>",
+                        text_to_display,
+                        flags=re.IGNORECASE
+                    )
+                        
+            src = el.text_source if el.type == 'paragraph' else el.description_source
+            st.markdown(f"**Text / Description:** {render_source_badge(src)}\n\n{text_to_display}", unsafe_allow_html=True)
             
         if el.metadata:
             st.markdown("**Element Metadata:**")
             for m in el.metadata:
-                st.markdown(f"- **{m.name}**: {m.value}")
+                st.markdown(f"- **{m.name}**: {m.value} {render_source_badge(m.source)}", unsafe_allow_html=True)
 
 def main():
     st.set_page_config(page_title="Data Search Demo", layout="wide")
@@ -272,13 +343,13 @@ def main():
     if not elements:
         return
         
-    if 'selected_element' in st.session_state:
-        show_detail_page(st.session_state['selected_element'])
-        return
-        
     # Sidebar filters
     st.sidebar.header("Search Filters")
     search_query = st.sidebar.text_input("Search text (case-insensitive):", "")
+    
+    if 'selected_element' in st.session_state:
+        show_detail_page(st.session_state['selected_element'], search_query)
+        return
     type_options = list(set(e.type for e in elements))
     selected_types = st.sidebar.multiselect("Filter by type:", options=type_options, default=type_options)
     

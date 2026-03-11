@@ -10,18 +10,26 @@ from arkindex_export.models import ElementPath
 from pathlib import Path
 
 @dataclass
+class Source:
+    method: str               # "manual", "ai", "ocr", "import"
+    agent: Optional[str] = None   # user id, model name (e.g. "gliner-base")
+    confidence: Optional[float] = None
+
+@dataclass
 class IIIFRegion:
     x: int
     y: int
     width: int
     height: int
     rotation_angle: int
+    source: Optional[Source] = None
 
 @dataclass  
 class Metadata:
     name: str
     value: str
     type: str
+    source: Optional[Source] = None
 
 @dataclass
 class View:
@@ -37,6 +45,7 @@ class Paragraph:
     view_id: str
     region: IIIFRegion
     text: str
+    text_source: Optional[Source] = None
 
 @dataclass
 class Illustration:
@@ -44,6 +53,7 @@ class Illustration:
     view_id: str
     region: IIIFRegion
     description: str
+    description_source: Optional[Source] = None
     metadata: List[Metadata] = field(default_factory=list)
 
 @dataclass
@@ -52,6 +62,7 @@ class ArtWork:
     iiif_base: str
     region: IIIFRegion
     description: str
+    description_source: Optional[Source] = None
     metadata: List[Metadata] = field(default_factory=list)
 
 @dataclass
@@ -68,10 +79,10 @@ class CustomEncoder(json.JSONEncoder):
             return obj.isoformat()
         return super().default(obj)
 
-def get_region_obj(element) -> IIIFRegion:
+def get_region_obj(element, source: Optional[Source] = None) -> IIIFRegion:
     polygon_points_str = element.polygon
     if not polygon_points_str:
-        return IIIFRegion(x=0, y=0, width=0, height=0, rotation_angle=0)
+        return IIIFRegion(x=0, y=0, width=0, height=0, rotation_angle=0, source=source)
     polygon_points = ast.literal_eval(polygon_points_str)
     x_coords = [point[0] for point in polygon_points]
     y_coords = [point[1] for point in polygon_points]
@@ -86,7 +97,8 @@ def get_region_obj(element) -> IIIFRegion:
         y=y_min,
         width=width,
         height=height,
-        rotation_angle=element.rotation_angle or 0
+        rotation_angle=element.rotation_angle or 0,
+        source=source
     )
 
 def main():
@@ -112,7 +124,7 @@ def main():
             except ValueError:
                 pass
         
-        metas_list = [Metadata(name=m.name, value=m.value, type=m.type) for m in metas_db]
+        metas_list = [Metadata(name=m.name, value=m.value, type=m.type, source=Source(method="manual")) for m in metas_db]
         
         doc = Document(
             id=doc_el.id,
@@ -159,19 +171,22 @@ def main():
                         break
             
             if element.type == 'paragraph':
+                text_src = Source(method="ocr", agent="microsoft_ocr") if transcription_text else None
                 p = Paragraph(
                     id=element.id,
                     view_id=view.id,
                     region=get_region_obj(element),
-                    text=transcription_text
+                    text=transcription_text,
+                    text_source=text_src
                 )
                 data.append({'type': 'paragraph', **asdict(p)})
             elif element.type == 'illustration':
-                metas = [Metadata(name=m.name, value=m.value, type=m.type) for m in DBMetadata.select().where(DBMetadata.element_id == element.id)]
+                reg_src = Source(method="ai", agent="yolo")
+                metas = [Metadata(name=m.name, value=m.value, type=m.type, source=Source(method="manual")) for m in DBMetadata.select().where(DBMetadata.element_id == element.id)]
                 i = Illustration(
                     id=element.id,
                     view_id=view.id,
-                    region=get_region_obj(element),
+                    region=get_region_obj(element, source=reg_src),
                     description=transcription_text,
                     metadata=metas
                 )
@@ -187,7 +202,7 @@ def main():
                 transcription_text = ' '.join(clean_text.split())
                 break
                 
-        metas = [Metadata(name=m.name, value=m.value, type=m.type) for m in DBMetadata.select().where(DBMetadata.element_id == painting.id)]
+        metas = [Metadata(name=m.name, value=m.value, type=m.type, source=Source(method="manual")) for m in DBMetadata.select().where(DBMetadata.element_id == painting.id)]
         
         a = ArtWork(
             id=painting.id,
