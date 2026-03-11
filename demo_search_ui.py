@@ -479,61 +479,9 @@ def main():
     if 'page_num' not in st.session_state:
         st.session_state.page_num = 0
 
-    numeric_meta = {}
-    date_meta = {}
-    
-    for e in elements:
-        if e.metadata:
-            for m in e.metadata:
-                if m.type == 'numeric' and m.value is not None:
-                    try:
-                        val = float(m.value)
-                        if m.name not in numeric_meta:
-                            numeric_meta[m.name] = {'min': val, 'max': val}
-                        else:
-                            numeric_meta[m.name]['min'] = min(numeric_meta[m.name]['min'], val)
-                            numeric_meta[m.name]['max'] = max(numeric_meta[m.name]['max'], val)
-                    except ValueError:
-                        pass
-                        
-                elif m.type == 'date' and m.value is not None:
-                    try:
-                        val = datetime.strptime(str(m.value).split('T')[0], '%Y-%m-%d').date()
-                        if m.name not in date_meta:
-                            date_meta[m.name] = {'min': val, 'max': val}
-                        else:
-                            date_meta[m.name]['min'] = min(date_meta[m.name]['min'], val)
-                            date_meta[m.name]['max'] = max(date_meta[m.name]['max'], val)
-                    except ValueError:
-                        pass
-    
-    st.sidebar.markdown("---")
-    st.sidebar.header("Metadata Filters")
-    
-    active_filters = {'numeric': {}, 'date': {}}
-    
-    for name, bounds in numeric_meta.items():
-        if bounds['min'] < bounds['max']: 
-            with st.sidebar.expander(f"Filter by {name}"):
-                selected_range = st.slider(
-                    f"{name}", 
-                    min_value=float(bounds['min']), 
-                    max_value=float(bounds['max']), 
-                    value=(float(bounds['min']), float(bounds['max'])),
-                    key=f"slider_{name}"
-                )
-                if selected_range != (bounds['min'], bounds['max']):
-                    active_filters['numeric'][name] = selected_range
 
-    for name, bounds in date_meta.items():
-        if bounds['min'] < bounds['max']:
-            with st.sidebar.expander(f"Filter by {name}"):
-                start_date = st.date_input(f"{name} (Start)", value=bounds['min'], min_value=bounds['min'], max_value=bounds['max'], key=f"ds_{name}")
-                end_date = st.date_input(f"{name} (End)", value=bounds['max'], min_value=bounds['min'], max_value=bounds['max'], key=f"de_{name}")
-                if start_date > bounds['min'] or end_date < bounds['max']:
-                    active_filters['date'][name] = (start_date, end_date)
 
-    current_state = (search_query, selected_types, list(active_filters['numeric'].items()), list(active_filters['date'].items()))
+    current_state = (search_query, selected_types)
     if 'last_query' not in st.session_state or st.session_state.last_query != current_state:
         st.session_state.page_num = 0
         st.session_state.last_query = current_state
@@ -545,6 +493,7 @@ def main():
         search_parameters = {
             'q': q,
             'query_by': 'text,description,concept_labels,metadata_values',
+            'facet_by': 'concept_categories,concept_levels,type',
             'per_page': 250
         }
         
@@ -572,6 +521,8 @@ def main():
             
             element_map = {e.id: e for e in elements}
             results = []
+            ts_facets = ts_results.get('facet_counts', [])
+            
             for hit in ts_results.get('hits', []):
                 hid = hit['document']['id']
                 if hid in element_map:
@@ -596,54 +547,13 @@ def main():
             st.error(f"Typesense search error: {e}")
             results = []
             total_ts_results = 0
+            ts_facets = []
     else:
         results = []
         total_ts_results = 0
+        ts_facets = []
 
-    if active_filters['numeric'] or active_filters['date']:
-        filtered_results = []
-        for e in results:
-            keep = True
-            if not e.metadata:
-                keep = False
-            else:
-                meta_dict = {m.name: m for m in e.metadata}
-                
-                for name, (min_v, max_v) in active_filters['numeric'].items():
-                    if name not in meta_dict:
-                        keep = False
-                        break
-                    try:
-                        val = float(meta_dict[name].value)
-                        if not (min_v <= val <= max_v):
-                            keep = False
-                            break
-                    except (ValueError, TypeError):
-                        keep = False
-                        break
-                
-                if not keep:
-                    continue
-                    
-                for name, (start_d, end_d) in active_filters['date'].items():
-                    if name not in meta_dict:
-                        keep = False
-                        break
-                    try:
-                        val = datetime.strptime(str(meta_dict[name].value).split('T')[0], '%Y-%m-%d').date()
-                        if not (start_d <= val <= end_d):
-                            keep = False
-                            break
-                    except (ValueError, TypeError):
-                        keep = False
-                        break
-            
-            if keep:
-                filtered_results.append(e)
-        results = filtered_results
-        total_results = len(results)
-    else:
-        total_results = total_ts_results if 'total_ts_results' in locals() else len(results)
+    total_results = total_ts_results if 'total_ts_results' in locals() else len(results)
         
     items_per_page = 50
     start_idx = st.session_state.page_num * items_per_page
@@ -652,6 +562,24 @@ def main():
         
     if total_results > 0:
         st.subheader(f"Found {total_results} results (showing {start_idx + 1}-{min(end_idx, total_results)})")
+        
+        if ts_facets:
+            st.sidebar.markdown("---")
+            st.sidebar.header("Facet Statistics")
+            for facet in ts_facets:
+                field_name = facet.get('field_name', 'Unknown').replace('concept_', '').replace('_', ' ').title()
+                counts = facet.get('counts', [])
+                
+                if counts:
+                    with st.sidebar.expander(f"📊 {field_name}"):
+                        for c in counts[:10]: # Show top 10
+                            val = c.get('value', 'unknown')
+                            if field_name.lower() == 'levels':
+                                val = f"{val} ({PYRAMID_LEVELS.get(int(val), 'unknown')})" if str(val).isdigit() else val
+                            st.write(f"- {val}: `{c.get('count', 0)}`")
+                        
+                        if len(counts) > 10:
+                            st.caption(f"*... and {len(counts) - 10} more*")
     else:
         st.subheader(f"Found 0 results")
     
